@@ -1,0 +1,18 @@
+[package]
+name = "html2md"
+authors = ["Radu Matei <radu@fermyon.com>"]
+description = "Fetch a URL and convert HTML to Markdown for AI agents"
+version = "0.1.0"
+rust-version = "1.78"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+spin-sdk = "5.1.1"
+htmd = "0.1"
+url = "2"
+
+[workspace]

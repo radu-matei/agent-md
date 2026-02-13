@@ -1,0 +1,20 @@
+spin_manifest_version = 2
+
+[application]
+name = "agent-md"
+version = "0.1.0"
+authors = ["Radu Matei <radu@fermyon.com>"]
+description = ""
+
+[[trigger.http]]
+route = "/..."
+component = "html2md"
+
+[component.html2md]
+source = "html2md/target/wasm32-wasip1/release/html2md.wasm"
+# We allow the component to fetch arbitrary URLs from the Internet to convert them to Markdown.
+allowed_outbound_hosts = ["https://*:*", "http://*:*"]
+[component.html2md.build]
+command = "cargo build --target wasm32-wasip1 --release"
+workdir = "html2md"
+watch = ["src/**/*.rs", "Cargo.toml"]
