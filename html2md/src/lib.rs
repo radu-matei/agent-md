@@ -139,8 +139,55 @@ async fn fetch_and_convert(url: &str) -> Result<Response> {
     let html = resp.into_body();
     let html_str = String::from_utf8(html).context("Response body is not valid UTF-8")?;
 
+    let base_url = current_url.clone();
+    let base_url2 = current_url.clone();
+
     let converter = htmd::HtmlToMarkdown::builder()
         .skip_tags(vec!["script", "style", "noscript"])
+        // Rewrite <a href> to absolute URLs.
+        .add_handler(vec!["a"], move |element: htmd::Element| {
+            let mut href: Option<String> = None;
+            let mut title: Option<String> = None;
+            for attr in element.attrs {
+                match attr.name.local.as_ref() {
+                    "href" => href = Some(attr.value.to_string()),
+                    "title" => title = Some(attr.value.to_string()),
+                    _ => {}
+                }
+            }
+            let content = element.content;
+            let Some(raw_href) = href else {
+                return Some(content.to_string());
+            };
+            let resolved = resolve_url(&base_url, &raw_href);
+            let escaped = resolved.replace('(', "\\(").replace(')', "\\)");
+            let title_part = title.map_or(String::new(), |t| {
+                format!(" \"{}\"", t.replace('"', "\\\""))
+            });
+            Some(format!("[{content}]({escaped}{title_part})"))
+        })
+        // Rewrite <img src> to absolute URLs.
+        .add_handler(vec!["img"], move |element: htmd::Element| {
+            let mut src: Option<String> = None;
+            let mut alt: Option<String> = None;
+            let mut title: Option<String> = None;
+            for attr in element.attrs {
+                match attr.name.local.as_ref() {
+                    "src" | "href" => src = Some(attr.value.to_string()),
+                    "alt" => alt = Some(attr.value.to_string()),
+                    "title" => title = Some(attr.value.to_string()),
+                    _ => {}
+                }
+            }
+            let src = src?;
+            let resolved = resolve_url(&base_url2, &src);
+            let escaped = resolved.replace('(', "\\(").replace(')', "\\)");
+            let alt = alt.unwrap_or_default();
+            let title_part = title.map_or(String::new(), |t| {
+                format!(" \"{}\"", t.replace('"', "\\\""))
+            });
+            Some(format!("![{alt}]({escaped}{title_part})"))
+        })
         .build();
 
     let md = converter
@@ -152,4 +199,25 @@ async fn fetch_and_convert(url: &str) -> Result<Response> {
         .header("content-type", "text/markdown; charset=utf-8")
         .body(md)
         .build())
+}
+
+/// Resolve a potentially relative URL against a base URL.
+/// If the href is already absolute or the base can't be parsed, return the href as-is.
+fn resolve_url(base: &str, href: &str) -> String {
+    // Already absolute.
+    if href.starts_with("http://") || href.starts_with("https://") || href.starts_with("//") {
+        return href.to_string();
+    }
+    // Fragment-only or data/mailto/javascript — leave as-is.
+    if href.starts_with('#')
+        || href.starts_with("data:")
+        || href.starts_with("mailto:")
+        || href.starts_with("javascript:")
+    {
+        return href.to_string();
+    }
+    url::Url::parse(base)
+        .and_then(|b| b.join(href))
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| href.to_string())
 }

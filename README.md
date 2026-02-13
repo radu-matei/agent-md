@@ -105,7 +105,3 @@ spin aka deploy
    [`htmd`](https://crates.io/crates/htmd) crate (built on
    [`html5ever`](https://crates.io/crates/html5ever)).
 5. It returns the Markdown body to the caller.
-
-## License
-
-See [LICENSE](LICENSE).
