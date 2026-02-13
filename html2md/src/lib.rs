@@ -1,11 +1,10 @@
 use anyhow::{anyhow, Context, Result};
+use scraper::{Html, Selector};
 use spin_sdk::http::{IntoResponse, Request, Response, Router};
 use spin_sdk::http_component;
+use std::collections::BTreeMap;
 
-/// An Akamai Function that fetches a URL and converts the HTML content to Markdown.
-///
-/// This optimizes token transfer for AI agents by stripping away HTML markup
-/// and returning clean Markdown content.
+/// A Spin Function that fetches a URL and converts the HTML content to Markdown.
 ///
 /// Usage:
 ///   GET  /?url=https://example.com
@@ -194,11 +193,174 @@ async fn fetch_and_convert(url: &str) -> Result<Response> {
         .convert(&html_str)
         .map_err(|e| anyhow!("HTML-to-Markdown conversion failed: {e}"))?;
 
+    // Extract metadata from <head> and prepend as YAML frontmatter.
+    let meta = extract_meta(&html_str, &current_url);
+    let frontmatter = format_frontmatter(&meta);
+
+    let body = format!("{frontmatter}{md}");
+
     Ok(Response::builder()
         .status(200)
         .header("content-type", "text/markdown; charset=utf-8")
-        .body(md)
+        .body(body)
         .build())
+}
+
+/// Extract metadata from the HTML `<head>` for use as YAML frontmatter.
+///
+/// Pulls `<title>`, common `<meta>` tags (description, author, keywords,
+/// Open Graph, Twitter Cards, article times), and `<link rel="canonical">`.
+fn extract_meta(html: &str, base_url: &str) -> BTreeMap<String, String> {
+    let doc = Html::parse_document(html);
+    let mut meta = BTreeMap::new();
+
+    // <title>
+    if let Ok(sel) = Selector::parse("title") {
+        if let Some(el) = doc.select(&sel).next() {
+            let t = el.text().collect::<String>();
+            let t = t.trim();
+            if !t.is_empty() {
+                meta.insert("title".into(), t.to_string());
+            }
+        }
+    }
+
+    // <link rel="canonical">
+    if let Ok(sel) = Selector::parse(r#"link[rel="canonical"]"#) {
+        if let Some(el) = doc.select(&sel).next() {
+            if let Some(href) = el.value().attr("href") {
+                let href = href.trim();
+                if !href.is_empty() {
+                    meta.insert("url".into(), resolve_url(base_url, href));
+                }
+            }
+        }
+    }
+
+    // <meta name="..." content="...">  and  <meta property="..." content="...">
+    if let Ok(sel) = Selector::parse("meta[content]") {
+        for el in doc.select(&sel) {
+            let content = el.value().attr("content").unwrap_or_default().trim();
+            if content.is_empty() {
+                continue;
+            }
+            let content = content.to_string();
+
+            // key is either the `name` or `property` attribute
+            let key = el
+                .value()
+                .attr("name")
+                .or_else(|| el.value().attr("property"))
+                .unwrap_or_default()
+                .to_lowercase();
+
+            match key.as_str() {
+                // Basic meta
+                "description" => {
+                    meta.entry("description".into()).or_insert(content);
+                }
+                "author" => {
+                    meta.entry("author".into()).or_insert(content);
+                }
+                "keywords" => {
+                    meta.entry("keywords".into()).or_insert(content);
+                }
+
+                // Open Graph
+                "og:title" => {
+                    // OG title wins over <title> if present
+                    meta.insert("title".into(), content);
+                }
+                "og:description" => {
+                    meta.entry("description".into()).or_insert(content);
+                }
+                "og:image" => {
+                    meta.insert(
+                        "image".into(),
+                        resolve_url(base_url, &content),
+                    );
+                }
+                "og:url" => {
+                    meta.entry("url".into()).or_insert(content);
+                }
+                "og:type" => {
+                    meta.insert("type".into(), content);
+                }
+                "og:site_name" => {
+                    meta.insert("site_name".into(), content);
+                }
+                "og:locale" => {
+                    meta.insert("locale".into(), content);
+                }
+
+                // Twitter Cards
+                "twitter:title" => {
+                    meta.entry("title".into()).or_insert(content);
+                }
+                "twitter:description" => {
+                    meta.entry("description".into()).or_insert(content);
+                }
+                "twitter:image" => {
+                    meta.entry("image".into())
+                        .or_insert_with(|| resolve_url(base_url, &content));
+                }
+
+                // Article timestamps
+                "article:published_time" => {
+                    meta.insert("published".into(), content);
+                }
+                "article:modified_time" => {
+                    meta.insert("modified".into(), content);
+                }
+
+                _ => {}
+            }
+        }
+    }
+
+    meta
+}
+
+/// Format a metadata map as a YAML frontmatter block (`---\n...\n---\n`).
+/// Returns an empty string when there is no metadata.
+fn format_frontmatter(meta: &BTreeMap<String, String>) -> String {
+    if meta.is_empty() {
+        return String::new();
+    }
+
+    // Preferred key order — anything not listed here comes at the end
+    // in BTreeMap's natural alphabetical order.
+    const ORDER: &[&str] = &[
+        "title",
+        "description",
+        "image",
+        "url",
+        "author",
+        "published",
+        "modified",
+        "type",
+        "site_name",
+        "locale",
+        "keywords",
+    ];
+
+    let mut lines = Vec::with_capacity(meta.len());
+
+    // Emit keys in preferred order first.
+    for &key in ORDER {
+        if let Some(value) = meta.get(key) {
+            lines.push(format!("{key}: {value}"));
+        }
+    }
+
+    // Emit any remaining keys we didn't explicitly order.
+    for (key, value) in meta {
+        if !ORDER.contains(&key.as_str()) {
+            lines.push(format!("{key}: {value}"));
+        }
+    }
+
+    format!("---\n{}\n---\n\n", lines.join("\n"))
 }
 
 /// Resolve a potentially relative URL against a base URL.

@@ -1,6 +1,6 @@
 # agent-md
 
-An Akamai Function that fetches a web page and returns its content as Markdown.
+An Spin function that fetches a web page and returns its content as Markdown.
 
 When AI agents browse the web they don't need HTML — they need the content.
 agent-md sits between the agent and the origin, fetching the page, verifying it
@@ -89,11 +89,6 @@ console.log(markdown);
 | Response is not HTML | 400 | `The URL did not return HTML (Content-Type: ...)` |
 | Unsupported HTTP method | 405 | Method Not Allowed |
 
-## Deploy to Akamai
-
-```bash
-spin aka deploy
-```
 
 ## How it works
 
