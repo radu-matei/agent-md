@@ -42,7 +42,23 @@ curl "http://127.0.0.1:3000/?url=https://example.com"
 curl -X POST -d "https://example.com" http://127.0.0.1:3000/
 ```
 
-Both return the page content as Markdown with `Content-Type: text/markdown; charset=utf-8`.
+### POST — pass HTML directly in the request body
+
+Send the HTML you already have and skip the fetch. Set `Content-Type: text/html`:
+
+```bash
+curl -X POST \
+  -H "Content-Type: text/html" \
+  --data-binary @page.html \
+  http://127.0.0.1:3000/
+```
+
+Because no origin URL is known in this mode, relative `<a href>` and `<img src>`
+values (and metadata URLs like `og:image` / canonical) are emitted unchanged.
+Absolute URLs are preserved as-is.
+
+All three forms return the page content as Markdown with
+`Content-Type: text/markdown; charset=utf-8`.
 
 ### Example output
 
@@ -84,18 +100,21 @@ console.log(markdown);
 | Scenario | Status | Body |
 | --- | --- | --- |
 | Missing `url` query parameter on GET | 500 | Error message with usage hint |
-| Empty POST body | 500 | Error message with usage hint |
-| Upstream returns non-2xx | 502 | `Upstream returned HTTP <status> when fetching <url>` |
-| Response is not HTML | 400 | `The URL did not return HTML (Content-Type: ...)` |
+| Empty POST body (URL mode) | 500 | Error message with usage hint |
+| Empty POST body (`Content-Type: text/html`) | 500 | Error message with usage hint |
+| Upstream returns non-2xx (URL mode) | 502 | `Upstream returned HTTP <status> when fetching <url>` |
+| Upstream response is not HTML (URL mode) | 400 | `The URL did not return HTML (Content-Type: ...)` |
 | Unsupported HTTP method | 405 | Method Not Allowed |
 
 
 ## How it works
 
-1. The function receives an HTTP request (GET or POST) containing the target URL.
-2. It fetches the page from the origin with `Accept: text/html`.
-3. It checks that the upstream returned a successful (2xx) response with a
-   `text/html` Content-Type.
+1. The function receives an HTTP request (GET or POST).
+2. **URL mode** (GET, or POST without `Content-Type: text/html`): it fetches
+   the page from the origin with `Accept: text/html`, following redirects, and
+   verifies the response is a 2xx `text/html` body.
+3. **HTML mode** (POST with `Content-Type: text/html`): the request body is
+   used as the HTML directly — no fetch is performed.
 4. It converts the HTML to Markdown using the
    [`htmd`](https://crates.io/crates/htmd) crate (built on
    [`html5ever`](https://crates.io/crates/html5ever)).

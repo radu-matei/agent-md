@@ -38,12 +38,32 @@ async fn handle_get(req: Request, _params: spin_sdk::http::Params) -> Result<imp
     fetch_and_convert(&url).await
 }
 
-/// Handle POST requests — read the URL from the plain-text request body.
+/// Handle POST requests. Dispatches on `Content-Type`:
+///   * `text/html`     — body is HTML to convert directly (no fetch).
+///   * anything else   — body is a plain-text URL to fetch.
 async fn handle_post(
     req: Request,
     _params: spin_sdk::http::Params,
 ) -> Result<impl IntoResponse> {
+    let content_type = req
+        .header("content-type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
     let body = req.body();
+
+    if content_type.starts_with("text/html") {
+        let html = std::str::from_utf8(body)
+            .context("Request body is not valid UTF-8")?;
+        if html.trim().is_empty() {
+            return Err(anyhow!(
+                "POST body is empty. Send HTML as the request body with Content-Type: text/html."
+            ));
+        }
+        return convert_to_markdown(html, None);
+    }
+
     let url = std::str::from_utf8(body)
         .context("Request body is not valid UTF-8")?
         .trim()
@@ -51,7 +71,7 @@ async fn handle_post(
 
     if url.is_empty() {
         return Err(anyhow!(
-            "POST body is empty. Send the target URL as the request body."
+            "POST body is empty. Send the target URL as the request body, or send HTML with Content-Type: text/html."
         ));
     }
 
@@ -134,16 +154,24 @@ async fn fetch_and_convert(url: &str) -> Result<Response> {
             .build());
     }
 
-    // Convert the HTML body to Markdown.
     let html = resp.into_body();
     let html_str = String::from_utf8(html).context("Response body is not valid UTF-8")?;
 
-    let base_url = current_url.clone();
-    let base_url2 = current_url.clone();
+    convert_to_markdown(&html_str, Some(&current_url))
+}
+
+/// Convert an HTML string to a Markdown response.
+///
+/// When `base_url` is `Some`, relative `<a href>` / `<img src>` and metadata
+/// URLs (canonical, og:image, twitter:image) are resolved against it. When it
+/// is `None`, those values are emitted unchanged.
+fn convert_to_markdown(html_str: &str, base_url: Option<&str>) -> Result<Response> {
+    let base_url_a = base_url.map(|s| s.to_string());
+    let base_url_img = base_url.map(|s| s.to_string());
 
     let converter = htmd::HtmlToMarkdown::builder()
         .skip_tags(vec!["script", "style", "noscript"])
-        // Rewrite <a href> to absolute URLs.
+        // Rewrite <a href> to absolute URLs when a base is available.
         .add_handler(vec!["a"], move |element: htmd::Element| {
             let mut href: Option<String> = None;
             let mut title: Option<String> = None;
@@ -158,14 +186,14 @@ async fn fetch_and_convert(url: &str) -> Result<Response> {
             let Some(raw_href) = href else {
                 return Some(content.to_string());
             };
-            let resolved = resolve_url(&base_url, &raw_href);
+            let resolved = resolve_url(base_url_a.as_deref(), &raw_href);
             let escaped = resolved.replace('(', "\\(").replace(')', "\\)");
             let title_part = title.map_or(String::new(), |t| {
                 format!(" \"{}\"", t.replace('"', "\\\""))
             });
             Some(format!("[{content}]({escaped}{title_part})"))
         })
-        // Rewrite <img src> to absolute URLs.
+        // Rewrite <img src> to absolute URLs when a base is available.
         .add_handler(vec!["img"], move |element: htmd::Element| {
             let mut src: Option<String> = None;
             let mut alt: Option<String> = None;
@@ -179,7 +207,7 @@ async fn fetch_and_convert(url: &str) -> Result<Response> {
                 }
             }
             let src = src?;
-            let resolved = resolve_url(&base_url2, &src);
+            let resolved = resolve_url(base_url_img.as_deref(), &src);
             let escaped = resolved.replace('(', "\\(").replace(')', "\\)");
             let alt = alt.unwrap_or_default();
             let title_part = title.map_or(String::new(), |t| {
@@ -190,11 +218,11 @@ async fn fetch_and_convert(url: &str) -> Result<Response> {
         .build();
 
     let md = converter
-        .convert(&html_str)
+        .convert(html_str)
         .map_err(|e| anyhow!("HTML-to-Markdown conversion failed: {e}"))?;
 
     // Extract metadata from <head> and prepend as YAML frontmatter.
-    let meta = extract_meta(&html_str, &current_url);
+    let meta = extract_meta(html_str, base_url);
     let frontmatter = format_frontmatter(&meta);
 
     let body = format!("{frontmatter}{md}");
@@ -210,7 +238,7 @@ async fn fetch_and_convert(url: &str) -> Result<Response> {
 ///
 /// Pulls `<title>`, common `<meta>` tags (description, author, keywords,
 /// Open Graph, Twitter Cards, article times), and `<link rel="canonical">`.
-fn extract_meta(html: &str, base_url: &str) -> BTreeMap<String, String> {
+fn extract_meta(html: &str, base_url: Option<&str>) -> BTreeMap<String, String> {
     let doc = Html::parse_document(html);
     let mut meta = BTreeMap::new();
 
@@ -363,9 +391,10 @@ fn format_frontmatter(meta: &BTreeMap<String, String>) -> String {
     format!("---\n{}\n---\n\n", lines.join("\n"))
 }
 
-/// Resolve a potentially relative URL against a base URL.
-/// If the href is already absolute or the base can't be parsed, return the href as-is.
-fn resolve_url(base: &str, href: &str) -> String {
+/// Resolve a potentially relative URL against an optional base URL.
+/// If the href is already absolute, no base is given, or the base can't be
+/// parsed, return the href as-is.
+fn resolve_url(base: Option<&str>, href: &str) -> String {
     // Already absolute.
     if href.starts_with("http://") || href.starts_with("https://") || href.starts_with("//") {
         return href.to_string();
@@ -378,6 +407,9 @@ fn resolve_url(base: &str, href: &str) -> String {
     {
         return href.to_string();
     }
+    let Some(base) = base else {
+        return href.to_string();
+    };
     url::Url::parse(base)
         .and_then(|b| b.join(href))
         .map(|u| u.to_string())
